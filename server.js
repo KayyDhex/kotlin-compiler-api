@@ -7,8 +7,29 @@ const PORT = process.env.PORT || 8080;
 // Cache en memoria para respuestas rápidas
 const cache = new Map();
 
-// APIs backup si una falla
+// APIs backup si una falla - con mejor debugging
 const APIS = [
+  {
+    name: 'JDoodle',
+    url: 'https://api.jdoodle.com/v1/execute',
+    transform: (code, stdin) => ({
+      clientId: 'your_client_id', // Reemplazaremos esto
+      clientSecret: 'your_client_secret', // Reemplazaremos esto  
+      script: code,
+      language: 'kotlin',
+      versionIndex: '0',
+      stdin: stdin || ''
+    }),
+    parseResponse: (data) => {
+      console.log('JDoodle response:', JSON.stringify(data, null, 2));
+      return {
+        success: !data.error && data.statusCode !== 400,
+        output: data.output || '',
+        error: data.error || data.statusCode === 400 ? 'API Error: Need JDoodle credentials' : '',
+        status: data.error ? 'API Error' : 'Accepted'
+      };
+    }
+  },
   {
     name: 'CodeX',
     url: 'https://api.codex.jaagrav.in',
@@ -18,6 +39,7 @@ const APIS = [
       input: stdin || ''
     }),
     parseResponse: (data) => {
+      console.log('CodeX response:', JSON.stringify(data, null, 2));
       if (data.error) {
         return {
           success: false,
@@ -28,45 +50,49 @@ const APIS = [
       }
       return {
         success: !data.error,
-        output: data.output || '',
+        output: data.output || data.result || '',
         error: data.error || '',
         status: data.error ? 'Runtime Error' : 'Accepted'
       };
     }
   },
   {
-    name: 'OneCompiler',
-    url: 'https://onecompiler.com/api/code/exec',
+    name: 'Paiza',
+    url: 'https://api.paiza.io/runners/create',
     transform: (code, stdin) => ({
+      source_code: code,
       language: 'kotlin',
-      stdin: stdin || '',
-      files: [{
-        name: 'main.kt',
-        content: code
-      }]
+      input: stdin || '',
+      api_key: 'guest'
     }),
-    parseResponse: (data) => ({
-      success: !data.exception,
-      output: data.stdout || '',
-      error: data.stderr || data.exception || '',
-      status: data.exception ? 'Compilation Error' : 'Accepted'
-    })
+    parseResponse: (data) => {
+      console.log('Paiza response:', JSON.stringify(data, null, 2));
+      return {
+        success: !data.error,
+        output: data.stdout || data.output || '',
+        error: data.stderr || data.error || '',
+        status: data.error ? 'Compilation Error' : 'Accepted'
+      };
+    }
   },
   {
-    name: 'Programiz',
-    url: 'https://api.programiz.com/compiler-api/compile',
+    name: 'Rextester',
+    url: 'https://rextester.com/rundotnet/api',
     transform: (code, stdin) => ({
-      language: 'kotlin',
-      version: 'latest',
-      code: code,
-      input: stdin || ''
+      LanguageChoice: '21', // Kotlin ID
+      Program: code,
+      Input: stdin || '',
+      CompilerArgs: ''
     }),
-    parseResponse: (data) => ({
-      success: data.success,
-      output: data.output || '',
-      error: data.error || '',
-      status: data.success ? 'Accepted' : 'Compilation Error'
-    })
+    parseResponse: (data) => {
+      console.log('Rextester response:', JSON.stringify(data, null, 2));
+      return {
+        success: !data.Errors,
+        output: data.Result || '',
+        error: data.Errors || data.Warnings || '',
+        status: data.Errors ? 'Compilation Error' : 'Accepted'
+      };
+    }
   }
 ];
 
@@ -108,18 +134,23 @@ async function compileKotlin(code, stdin = '') {
     return cache.get(cacheKey);
   }
 
+  console.log(`Starting compilation for code length: ${code.length}`);
+  console.log(`Code preview: ${code.substring(0, 100)}...`);
+
   // Intentar con cada API hasta que una funcione
   for (const api of APIS) {
     try {
       console.log(`Trying ${api.name}...`);
       
       const requestData = api.transform(code, stdin);
+      console.log(`Request data for ${api.name}:`, JSON.stringify(requestData, null, 2));
+      
       const parsedUrl = new URL(api.url);
       
       const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || 443,
-        path: parsedUrl.pathname,
+        path: parsedUrl.pathname + (parsedUrl.search || ''),
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -129,12 +160,15 @@ async function compileKotlin(code, stdin = '') {
       };
 
       const response = await makeRequest(options, requestData);
+      console.log(`Raw response from ${api.name}:`, JSON.stringify(response, null, 2));
+      
       const result = api.parseResponse(response);
+      console.log(`Parsed result from ${api.name}:`, JSON.stringify(result, null, 2));
       
       // Si funciona, guardar en cache y retornar
       if (result !== null) {
         cache.set(cacheKey, result);
-        console.log(`${api.name} success!`);
+        console.log(`${api.name} success! Output length: ${result.output.length}`);
         return result;
       }
       
@@ -145,10 +179,11 @@ async function compileKotlin(code, stdin = '') {
   }
 
   // Si todas las APIs fallan
+  console.log('All APIs failed, returning fallback response');
   return {
     success: false,
     output: '',
-    error: 'All compiler services are temporarily unavailable',
+    error: 'All compiler services are temporarily unavailable. Please try again later.',
     status: 'Service Error'
   };
 }
