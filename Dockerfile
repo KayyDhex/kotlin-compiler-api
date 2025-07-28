@@ -1,21 +1,17 @@
-# Usar imagen base más ligera
+# Imagen más simple - Node con Alpine
 FROM node:18-alpine
 
-# Variables de entorno para optimizar memoria
+# Variables de entorno
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV JAVA_OPTS="-Xmx128m -Xms64m"
 
-# Instalar Java y Kotlin de forma más eficiente
-RUN apk add --no-cache \
-    openjdk11-jre \
-    wget \
-    unzip \
-    && wget -q https://github.com/JetBrains/kotlin/releases/download/v1.8.22/kotlin-compiler-1.8.22.zip \
-    && unzip -q kotlin-compiler-1.8.22.zip \
-    && mv kotlinc /opt/kotlinc \
-    && rm kotlin-compiler-1.8.22.zip \
-    && apk del wget unzip
+# Instalar Java y dependencias básicas
+RUN apk add --no-cache openjdk11-jre wget
+
+# Descargar Kotlin compiler
+RUN wget -q https://github.com/JetBrains/kotlin/releases/download/v1.8.22/kotlin-compiler-1.8.22.zip \
+    && unzip -q kotlin-compiler-1.8.22.zip -d /opt \
+    && rm kotlin-compiler-1.8.22.zip
 
 # Agregar Kotlin al PATH
 ENV PATH="/opt/kotlinc/bin:${PATH}"
@@ -23,23 +19,11 @@ ENV PATH="/opt/kotlinc/bin:${PATH}"
 # Crear directorio de trabajo
 WORKDIR /app
 
-# Copiar archivos
-COPY package.json .
+# Copiar solo el archivo principal (sin package.json)
 COPY simple-kotlin-compiler.js .
-
-# Instalar dependencias de Node
-RUN npm ci --only=production && npm cache clean --force
-
-# Usuario no-root para seguridad
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
-USER nextjs
 
 # Exponer puerto
 EXPOSE $PORT
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:$PORT/health || exit 1
-
-# Comando de inicio con límites de memoria
-CMD ["node", "--max-old-space-size=256", "simple-kotlin-compiler.js"]
+# Comando de inicio simple
+CMD ["node", "simple-kotlin-compiler.js"]

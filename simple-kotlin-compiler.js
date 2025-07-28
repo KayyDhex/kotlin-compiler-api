@@ -1,27 +1,113 @@
-const express = require('express');
+// ¡SIN DEPENDENCIAS EXTERNAS! Solo Node.js built-in
+const http = require('http');
 const { exec } = require('child_process');
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
+const url = require('url');
 
-const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Middleware
-app.use(express.json({ limit: '10mb' }));
+// Servidor HTTP simple sin Express
+const server = http.createServer(async (req, res) => {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Content-Type', 'application/json');
 
-// CORS para todas las solicitudes
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
   if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  const parsedUrl = url.parse(req.url, true);
+  const path = parsedUrl.pathname;
+
+  try {
+    if (req.method === 'GET' && path === '/') {
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        message: 'Kotlin Compiler API - Solo para estudiantes',
+        status: 'running',
+        supported_language: 'Kotlin (language_id: 78)',
+        version: '1.0.0'
+      }));
+    }
+    else if (req.method === 'GET' && path === '/health') {
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: 'healthy' }));
+    }
+    else if (req.method === 'GET' && path === '/languages') {
+      res.writeHead(200);
+      res.end(JSON.stringify([{
+        id: 78,
+        name: 'Kotlin',
+        is_archived: false,
+        source_file: 'Main.kt',
+        compile_cmd: 'kotlinc Main.kt -include-runtime -d program.jar',
+        run_cmd: 'java -jar program.jar'
+      }]));
+    }
+    else if (req.method === 'POST' && path === '/submissions') {
+      let body = '';
+      req.on('data', chunk => body += chunk.toString());
+      req.on('end', async () => {
+        try {
+          const data = JSON.parse(body);
+          const result = await handleSubmission(data);
+          res.writeHead(200);
+          res.end(JSON.stringify(result));
+        } catch (error) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Invalid JSON or request' }));
+        }
+      });
+    }
+    else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Not found' }));
+    }
+  } catch (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: 'Internal server error' }));
   }
 });
+
+// Función para manejar submissions
+async function handleSubmission(data) {
+  const { source_code, language_id, stdin = '' } = data;
+  
+  if (!source_code) {
+    throw new Error('source_code es requerido');
+  }
+  
+  if (language_id && language_id !== 78) {
+    throw new Error('Solo se permite Kotlin (language_id: 78)');
+  }
+  
+  if (source_code.length > 50000) {
+    throw new Error('Código fuente demasiado largo');
+  }
+  
+  const result = await compileAndRunKotlin(source_code, stdin);
+  
+  return {
+    token: crypto.randomUUID(),
+    status: {
+      id: result.success ? 3 : (result.status === 'Compilation Error' ? 6 : 5),
+      description: result.status
+    },
+    stdout: result.output,
+    stderr: result.error,
+    compile_output: result.error,
+    time: result.time,
+    memory: result.memory,
+    created_at: new Date().toISOString(),
+    finished_at: new Date().toISOString()
+  };
+}
 
 // Función para compilar y ejecutar Kotlin
 async function compileAndRunKotlin(sourceCode, stdin = '') {
@@ -121,91 +207,8 @@ function executeCommand(command, cwd, timeout = 10000, stdin = '') {
   });
 }
 
-// Endpoint principal - compatible con Judge0 API
-app.post('/submissions', async (req, res) => {
-  try {
-    const { source_code, language_id, stdin = '', wait = false } = req.body;
-    
-    // Validaciones
-    if (!source_code) {
-      return res.status(400).json({
-        error: 'source_code es requerido'
-      });
-    }
-    
-    // Solo aceptar Kotlin (language_id 78)
-    if (language_id && language_id !== 78) {
-      return res.status(400).json({
-        error: 'Solo se permite Kotlin (language_id: 78)'
-      });
-    }
-    
-    // Límites de seguridad
-    if (source_code.length > 50000) { // 50KB max
-      return res.status(400).json({
-        error: 'Código fuente demasiado largo'
-      });
-    }
-    
-    // Compilar y ejecutar
-    const result = await compileAndRunKotlin(source_code, stdin);
-    
-    // Formatear respuesta compatible con Judge0
-    const response = {
-      token: crypto.randomUUID(),
-      status: {
-        id: result.success ? 3 : (result.status === 'Compilation Error' ? 6 : 5),
-        description: result.status
-      },
-      stdout: result.output,
-      stderr: result.error,
-      compile_output: result.error,
-      time: result.time,
-      memory: result.memory,
-      created_at: new Date().toISOString(),
-      finished_at: new Date().toISOString()
-    };
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error('Error processing submission:', error);
-    res.status(500).json({
-      error: 'Error interno del servidor'
-    });
-  }
-});
-
-// Health check
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Kotlin Compiler API - Solo para estudiantes',
-    status: 'running',
-    supported_language: 'Kotlin (language_id: 78)',
-    version: '1.0.0'
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
-});
-
-// Información de lenguajes (solo Kotlin)
-app.get('/languages', (req, res) => {
-  res.json([
-    {
-      id: 78,
-      name: 'Kotlin',
-      is_archived: false,
-      source_file: 'Main.kt',
-      compile_cmd: 'kotlinc Main.kt -include-runtime -d program.jar',
-      run_cmd: 'java -jar program.jar'
-    }
-  ]);
-});
-
 // Iniciar servidor
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Kotlin Compiler API ejecutándose en puerto ${PORT}`);
   console.log(`📚 Solo acepta Kotlin (language_id: 78)`);
   console.log(`🔒 Configurado para estudiantes con límites de seguridad`);
