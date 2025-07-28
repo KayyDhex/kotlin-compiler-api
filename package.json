@@ -1,0 +1,22 @@
+{
+    "name": "kotlin-compiler-proxy",
+    "version": "2.0.0",
+    "description": "Proxy API for Kotlin compilation with multiple fallbacks",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js",
+      "dev": "node server.js"
+    },
+    "engines": {
+      "node": ">=18.0.0"
+    },
+    "keywords": [
+      "kotlin",
+      "compiler",
+      "proxy",
+      "api",
+      "education"
+    ],
+    "author": "Tu nombre",
+    "license": "MIT"
+  }

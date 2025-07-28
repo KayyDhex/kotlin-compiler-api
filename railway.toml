@@ -1,7 +1,7 @@
 [build]
-builder = "dockerfile"
+builder = "nixpacks"
 
 [deploy]
 healthcheckPath = "/health"
 restartPolicyType = "on_failure"
-startCommand = "node simple-kotlin-compiler.js"
+startCommand = "node server.js"
