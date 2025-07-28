@@ -1,0 +1,21 @@
+[variables]
+NODE_VERSION = "18"
+
+[phases.setup]
+dependsOn = ["install"]
+
+[phases.install]
+cmds = [
+  "apt-get update",
+  "apt-get install -y openjdk-11-jdk wget unzip",
+  "wget -q https://github.com/JetBrains/kotlin/releases/download/v1.8.22/kotlin-compiler-1.8.22.zip",
+  "unzip -q kotlin-compiler-1.8.22.zip",
+  "mv kotlinc /app/kotlinc",
+  "rm kotlin-compiler-1.8.22.zip"
+]
+
+[phases.build]
+cmds = ["npm install --production"]
+
+[start]
+cmd = "node server.js"

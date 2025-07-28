@@ -1,191 +1,130 @@
 const http = require('http');
-const https = require('https');
+const { exec } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
+const crypto = require('crypto');
 const url = require('url');
 
 const PORT = process.env.PORT || 8080;
 
-// Cache en memoria para respuestas rápidas
-const cache = new Map();
-
-// APIs backup si una falla - con mejor debugging
-const APIS = [
-  {
-    name: 'JDoodle',
-    url: 'https://api.jdoodle.com/v1/execute',
-    transform: (code, stdin) => ({
-      clientId: 'your_client_id', // Reemplazaremos esto
-      clientSecret: 'your_client_secret', // Reemplazaremos esto  
-      script: code,
-      language: 'kotlin',
-      versionIndex: '0',
-      stdin: stdin || ''
-    }),
-    parseResponse: (data) => {
-      console.log('JDoodle response:', JSON.stringify(data, null, 2));
+// Función para compilar y ejecutar Kotlin LOCALMENTE
+async function compileKotlinLocal(sourceCode, stdin = '') {
+  const sessionId = crypto.randomUUID().substring(0, 8);
+  const tempDir = `/tmp/kotlin_${sessionId}`;
+  const sourceFile = path.join(tempDir, 'Main.kt');
+  const jarFile = path.join(tempDir, 'program.jar');
+  
+  console.log(`Starting compilation for session: ${sessionId}`);
+  
+  try {
+    // Crear directorio temporal
+    await fs.mkdir(tempDir, { recursive: true });
+    console.log(`Created temp directory: ${tempDir}`);
+    
+    // Escribir código fuente
+    await fs.writeFile(sourceFile, sourceCode, 'utf8');
+    console.log(`Written source file: ${sourceFile}`);
+    
+    // Compilar con kotlinc local
+    const compileResult = await executeCommand(
+      `/app/kotlinc/bin/kotlinc "${sourceFile}" -include-runtime -d "${jarFile}"`,
+      tempDir,
+      30000 // 30 segundos para compilar
+    );
+    
+    console.log(`Compile result:`, compileResult);
+    
+    if (compileResult.code !== 0) {
       return {
-        success: !data.error && data.statusCode !== 400,
-        output: data.output || '',
-        error: data.error || data.statusCode === 400 ? 'API Error: Need JDoodle credentials' : '',
-        status: data.error ? 'API Error' : 'Accepted'
+        success: false,
+        output: '',
+        error: compileResult.stderr || compileResult.stdout || 'Error de compilación',
+        status: 'Compilation Error',
+        time: compileResult.time,
+        memory: null
       };
     }
-  },
-  {
-    name: 'CodeX',
-    url: 'https://api.codex.jaagrav.in',
-    transform: (code, stdin) => ({
-      language: 'kt',
-      code: code,
-      input: stdin || ''
-    }),
-    parseResponse: (data) => {
-      console.log('CodeX response:', JSON.stringify(data, null, 2));
-      if (data.error) {
-        return {
-          success: false,
-          output: '',
-          error: data.error,
-          status: 'Compilation Error'
-        };
-      }
-      return {
-        success: !data.error,
-        output: data.output || data.result || '',
-        error: data.error || '',
-        status: data.error ? 'Runtime Error' : 'Accepted'
-      };
-    }
-  },
-  {
-    name: 'Paiza',
-    url: 'https://api.paiza.io/runners/create',
-    transform: (code, stdin) => ({
-      source_code: code,
-      language: 'kotlin',
-      input: stdin || '',
-      api_key: 'guest'
-    }),
-    parseResponse: (data) => {
-      console.log('Paiza response:', JSON.stringify(data, null, 2));
-      return {
-        success: !data.error,
-        output: data.stdout || data.output || '',
-        error: data.stderr || data.error || '',
-        status: data.error ? 'Compilation Error' : 'Accepted'
-      };
-    }
-  },
-  {
-    name: 'Rextester',
-    url: 'https://rextester.com/rundotnet/api',
-    transform: (code, stdin) => ({
-      LanguageChoice: '21', // Kotlin ID
-      Program: code,
-      Input: stdin || '',
-      CompilerArgs: ''
-    }),
-    parseResponse: (data) => {
-      console.log('Rextester response:', JSON.stringify(data, null, 2));
-      return {
-        success: !data.Errors,
-        output: data.Result || '',
-        error: data.Errors || data.Warnings || '',
-        status: data.Errors ? 'Compilation Error' : 'Accepted'
-      };
+    
+    // Ejecutar JAR
+    const runResult = await executeCommand(
+      `java -Xmx128m -jar "${jarFile}"`,
+      tempDir,
+      20000, // 20 segundos para ejecutar
+      stdin
+    );
+    
+    console.log(`Run result:`, runResult);
+    
+    return {
+      success: runResult.code === 0,
+      output: runResult.stdout || '',
+      error: runResult.stderr || '',
+      status: runResult.code === 0 ? 'Accepted' : 'Runtime Error',
+      time: runResult.time,
+      memory: null
+    };
+    
+  } catch (error) {
+    console.error(`Error in compilation:`, error);
+    return {
+      success: false,
+      output: '',
+      error: `Error interno: ${error.message}`,
+      status: 'Internal Error',
+      time: null,
+      memory: null
+    };
+  } finally {
+    // Limpiar archivos temporales
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      console.log(`Cleaned up: ${tempDir}`);
+    } catch (cleanupError) {
+      console.error('Error cleaning up:', cleanupError);
     }
   }
-];
+}
 
-// Función para hacer request HTTPS
-function makeRequest(options, postData) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          resolve({ error: 'Invalid JSON response', raw: data });
-        }
+// Función para ejecutar comandos
+function executeCommand(command, cwd, timeout = 10000, stdin = '') {
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    console.log(`Executing: ${command}`);
+    console.log(`Working directory: ${cwd}`);
+    
+    const child = exec(command, {
+      cwd,
+      timeout,
+      maxBuffer: 1024 * 1024, // 1MB buffer
+      env: { 
+        ...process.env, 
+        JAVA_HOME: '/usr/lib/jvm/java-11-openjdk-amd64',
+        PATH: '/app/kotlinc/bin:' + process.env.PATH
+      }
+    }, (error, stdout, stderr) => {
+      const time = (Date.now() - startTime) / 1000;
+      
+      console.log(`Command finished in ${time}s`);
+      console.log(`Exit code: ${error ? error.code : 0}`);
+      console.log(`Stdout: ${stdout}`);
+      console.log(`Stderr: ${stderr}`);
+      
+      resolve({
+        code: error ? (error.code || 1) : 0,
+        stdout: stdout || '',
+        stderr: stderr || '',
+        error: error,
+        time: time
       });
     });
     
-    req.on('error', reject);
-    req.setTimeout(30000, () => {
-      req.destroy();
-      reject(new Error('Request timeout'));
-    });
-    
-    if (postData) {
-      req.write(JSON.stringify(postData));
+    // Enviar stdin si existe
+    if (stdin) {
+      console.log(`Sending stdin: ${stdin}`);
+      child.stdin.write(stdin);
+      child.stdin.end();
     }
-    req.end();
   });
-}
-
-// Intentar compilar con múltiples APIs
-async function compileKotlin(code, stdin = '') {
-  const cacheKey = `${code}:${stdin}`;
-  
-  // Verificar cache
-  if (cache.has(cacheKey)) {
-    console.log('Cache hit');
-    return cache.get(cacheKey);
-  }
-
-  console.log(`Starting compilation for code length: ${code.length}`);
-  console.log(`Code preview: ${code.substring(0, 100)}...`);
-
-  // Intentar con cada API hasta que una funcione
-  for (const api of APIS) {
-    try {
-      console.log(`Trying ${api.name}...`);
-      
-      const requestData = api.transform(code, stdin);
-      console.log(`Request data for ${api.name}:`, JSON.stringify(requestData, null, 2));
-      
-      const parsedUrl = new URL(api.url);
-      
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || 443,
-        path: parsedUrl.pathname + (parsedUrl.search || ''),
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'KotlinCompilerAPI/1.0',
-          'Accept': 'application/json'
-        }
-      };
-
-      const response = await makeRequest(options, requestData);
-      console.log(`Raw response from ${api.name}:`, JSON.stringify(response, null, 2));
-      
-      const result = api.parseResponse(response);
-      console.log(`Parsed result from ${api.name}:`, JSON.stringify(result, null, 2));
-      
-      // Si funciona, guardar en cache y retornar
-      if (result !== null) {
-        cache.set(cacheKey, result);
-        console.log(`${api.name} success! Output length: ${result.output.length}`);
-        return result;
-      }
-      
-    } catch (error) {
-      console.log(`${api.name} failed:`, error.message);
-      continue;
-    }
-  }
-
-  // Si todas las APIs fallan
-  console.log('All APIs failed, returning fallback response');
-  return {
-    success: false,
-    output: '',
-    error: 'All compiler services are temporarily unavailable. Please try again later.',
-    status: 'Service Error'
-  };
 }
 
 // Servidor HTTP
@@ -209,20 +148,32 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/') {
       res.writeHead(200);
       res.end(JSON.stringify({
-        message: 'Kotlin Compiler Proxy API',
+        message: 'Kotlin Compiler API - LOCAL Installation',
         status: 'running',
         supported_language: 'Kotlin (language_id: 78)',
-        version: '2.0.0',
-        features: ['Multiple API fallbacks', 'In-memory caching', 'High availability']
+        version: '3.0.0',
+        type: 'Local Kotlin Installation',
+        unlimited: true
       }));
     }
     else if (req.method === 'GET' && path === '/health') {
-      res.writeHead(200);
-      res.end(JSON.stringify({ 
-        status: 'healthy',
-        cache_size: cache.size,
-        available_apis: APIS.length
-      }));
+      // Verificar que Kotlin esté instalado
+      try {
+        const kotlinVersion = await executeCommand('/app/kotlinc/bin/kotlinc -version', '/tmp', 5000);
+        res.writeHead(200);
+        res.end(JSON.stringify({ 
+          status: 'healthy',
+          kotlin_available: kotlinVersion.code === 0,
+          kotlin_version: kotlinVersion.stderr || kotlinVersion.stdout || 'Unknown'
+        }));
+      } catch (error) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ 
+          status: 'degraded',
+          kotlin_available: false,
+          error: 'Kotlin not properly installed'
+        }));
+      }
     }
     else if (req.method === 'GET' && path === '/languages') {
       res.writeHead(200);
@@ -230,7 +181,9 @@ const server = http.createServer(async (req, res) => {
         id: 78,
         name: 'Kotlin',
         is_archived: false,
-        source_file: 'Main.kt'
+        source_file: 'Main.kt',
+        compile_cmd: 'kotlinc Main.kt -include-runtime -d program.jar',
+        run_cmd: 'java -jar program.jar'
       }]));
     }
     else if (req.method === 'POST' && path === '/submissions') {
@@ -260,14 +213,12 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          // Compilar usando APIs externas
-          const startTime = Date.now();
-          const result = await compileKotlin(source_code, stdin);
-          const time = (Date.now() - startTime) / 1000;
+          // Compilar usando instalación local
+          const result = await compileKotlinLocal(source_code, stdin);
 
           // Formatear respuesta compatible con Judge0
           const response = {
-            token: `proxy-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            token: `local-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             status: {
               id: result.success ? 3 : (result.status === 'Compilation Error' ? 6 : 5),
               description: result.status
@@ -275,8 +226,8 @@ const server = http.createServer(async (req, res) => {
             stdout: result.output,
             stderr: result.error,
             compile_output: result.error,
-            time: time,
-            memory: null,
+            time: result.time,
+            memory: result.memory,
             created_at: new Date().toISOString(),
             finished_at: new Date().toISOString()
           };
@@ -285,6 +236,7 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify(response));
           
         } catch (error) {
+          console.error('Error processing submission:', error);
           res.writeHead(400);
           res.end(JSON.stringify({ error: 'Invalid JSON request' }));
         }
@@ -301,20 +253,28 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Limpiar cache cada hora
-setInterval(() => {
-  cache.clear();
-  console.log('Cache cleared');
-}, 3600000);
-
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Kotlin Compiler Proxy API running on port ${PORT}`);
-  console.log(`📚 Multiple fallback APIs configured`);
-  console.log(`⚡ In-memory caching enabled`);
-  console.log(`🔒 Railway hosted with unlimited requests`);
+  console.log(`🚀 Kotlin LOCAL Compiler API running on port ${PORT}`);
+  console.log(`📚 Using LOCAL Kotlin installation`);
+  console.log(`♾️ UNLIMITED requests - your own server!`);
+  console.log(`🏠 Hosted on Railway with your subscription`);
 });
 
-// Manejo de errores
+// Verificar instalación de Kotlin al iniciar
+executeCommand('/app/kotlinc/bin/kotlinc -version', '/tmp', 5000)
+  .then(result => {
+    if (result.code === 0) {
+      console.log('✅ Kotlin installation verified');
+      console.log(`📋 Version: ${result.stderr || result.stdout}`);
+    } else {
+      console.log('❌ Kotlin installation failed');
+      console.log(`Error: ${result.stderr || result.stdout}`);
+    }
+  })
+  .catch(error => {
+    console.log('❌ Cannot verify Kotlin installation:', error.message);
+  });
+
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
 });
