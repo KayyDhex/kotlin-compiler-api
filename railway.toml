@@ -1,7 +1,0 @@
-[build]
-builder = "nixpacks"
-
-[deploy]
-healthcheckPath = "/health"
-restartPolicyType = "on_failure"
-startCommand = "node server.js"
